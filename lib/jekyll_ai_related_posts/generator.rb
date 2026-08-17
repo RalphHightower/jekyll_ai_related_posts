@@ -16,6 +16,8 @@ module JekyllAiRelatedPosts
         cache_hits: 0,
         cache_misses: 0
       }
+      @embeddings_fetcher = new_fetcher if fetch_enabled?
+
       setup_database
 
       @indexed_posts = {}
@@ -24,7 +26,7 @@ module JekyllAiRelatedPosts
       end
 
       if fetch_enabled?
-        @embeddings_fetcher = new_fetcher
+        validate_cache_metadata
 
         @site.posts.docs.each do |p|
           ensure_embedding_cached(p)
@@ -85,9 +87,15 @@ module JekyllAiRelatedPosts
     def new_fetcher
       case @site.config["ai_related_posts"]["embeddings_source"]
       when "mock"
-        MockEmbeddings.new
+        model = @site.config["ai_related_posts"]["model"]
+        dimensions = @site.config["ai_related_posts"]["dimensions"]
+        MockEmbeddings.new(model: model, dimensions: dimensions)
       else
-        OpenAiEmbeddings.new(@site.config["ai_related_posts"]["openai_api_key"])
+        api_key = @site.config["ai_related_posts"]["api_key"] ||
+          @site.config["ai_related_posts"]["openai_api_key"]
+        api_url = @site.config["ai_related_posts"]["api_url"]
+        model = @site.config["ai_related_posts"]["model"]
+        ApiEmbeddings.new(api_key, api_url: api_url, model: model)
       end
     end
 
@@ -158,6 +166,14 @@ module JekyllAiRelatedPosts
       post.data["ai_related_posts"] = related_posts
     end
 
+    def dimensions
+      @embeddings_fetcher&.dimensions || ApiEmbeddings::DEFAULT_DIMENSIONS
+    end
+
+    def model
+      @embeddings_fetcher&.model || ApiEmbeddings::DEFAULT_MODEL
+    end
+
     def embedding_text(post)
       text = "Title: #{post.data["title"]}"
       text += "; Categories: #{post.data["categories"].join(", ")}" unless post.data["categories"].empty?
@@ -203,14 +219,51 @@ module JekyllAiRelatedPosts
       SQL
       ActiveRecord::Base.connection.execute(create_posts)
 
-      create_vss_posts = <<-SQL
-        CREATE VIRTUAL TABLE IF NOT EXISTS vss_posts using vss0(
-          post_embedding(#{OpenAiEmbeddings::DIMENSIONS})
+      unless table_exists?("vss_posts")
+        create_vss_posts = <<-SQL
+          CREATE VIRTUAL TABLE vss_posts using vss0(
+            post_embedding(#{dimensions})
+          );
+        SQL
+        ActiveRecord::Base.connection.execute(create_vss_posts)
+      end
+
+      create_cache_metadata = <<-SQL
+        CREATE TABLE IF NOT EXISTS cache_metadata(
+          key TEXT PRIMARY KEY,
+          value TEXT
         );
       SQL
-      ActiveRecord::Base.connection.execute(create_vss_posts)
+      ActiveRecord::Base.connection.execute(create_cache_metadata)
 
       Jekyll.logger.debug "AI Related Posts:", "DB setup complete"
+    end
+
+    def table_exists?(name)
+      ActiveRecord::Base.connection.table_exists?(name)
+    end
+
+    def validate_cache_metadata
+      model = @embeddings_fetcher&.model || ApiEmbeddings::DEFAULT_MODEL
+
+      stored_model = ActiveRecord::Base.connection.execute(
+        "SELECT value FROM cache_metadata WHERE key = 'model';"
+      ).first
+
+      if stored_model && stored_model["value"] != model
+        Jekyll.logger.error "AI Related Posts:", "Cache model mismatch!"
+        Jekyll.logger.error "AI Related Posts:", "  Configured model: #{model}"
+        Jekyll.logger.error "AI Related Posts:", "  Cached model:     #{stored_model["value"]}"
+        Jekyll.logger.error "AI Related Posts:", "Either update your config to match the cached model, or delete the cache file (.ai_related_posts_cache.sqlite3) and it will be regenerated."
+        raise Error, "Cache model mismatch: configured=#{model}, cached=#{stored_model["value"]}"
+      end
+
+      # Store/update metadata if not present
+      if stored_model.nil?
+        ActiveRecord::Base.connection.execute(
+          ActiveRecord::Base.sanitize_sql([ "INSERT INTO cache_metadata (key, value) VALUES ('model', ?);", model ])
+        )
+      end
     end
   end
 end

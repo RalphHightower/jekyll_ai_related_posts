@@ -7,7 +7,7 @@ RSpec.describe JekyllAiRelatedPosts::Generator do
   let(:config_overrides) do
     {
       "ai_related_posts" => {
-        "openai_api_key" => "my_key",
+        "api_key" => "my_key",
         "embeddings_source" => "mock"
       }
     }
@@ -24,8 +24,9 @@ RSpec.describe JekyllAiRelatedPosts::Generator do
   it "generates related posts" do
     site.process
 
-    wifi_upgrades = File.read(dest_dir("2023", "12", "22",
-                                       "home-wifi-upgrades-adding-an-access-point-with-wired-backhaul.html"))
+    wifi_upgrades = File.read(
+      dest_dir("2023", "12", "22", "home-wifi-upgrades-adding-an-access-point-with-wired-backhaul.html")
+    )
     expect(wifi_upgrades).to include("1:::Analyzing Static Website Logs with AWStats")
     expect(wifi_upgrades).to include("2:::Catching Mew: A Playable Game Boy Quote")
   end
@@ -58,7 +59,7 @@ RSpec.describe JekyllAiRelatedPosts::Generator do
     let(:config_overrides) do
       {
         "ai_related_posts" => {
-          "openai_api_key" => "my_key",
+          "api_key" => "my_key",
           "embeddings_source" => "mock",
           "fetch_enabled" => false
         }
@@ -69,6 +70,52 @@ RSpec.describe JekyllAiRelatedPosts::Generator do
       expect_any_instance_of(MockEmbeddings).not_to receive(:embedding_for)
 
       site.process
+    end
+  end
+
+  context "backward compatibility with openai_api_key" do
+    let(:config_overrides) do
+      {
+        "ai_related_posts" => {
+          "openai_api_key" => "my_key",
+          "embeddings_source" => "mock"
+        }
+      }
+    end
+
+    it "still generates related posts" do
+      site.process
+
+      wifi_upgrades = File.read(dest_dir("2023", "12", "22",
+                                         "home-wifi-upgrades-adding-an-access-point-with-wired-backhaul.html"))
+      expect(wifi_upgrades).to include("1:::Analyzing Static Website Logs with AWStats")
+      expect(wifi_upgrades).to include("2:::Catching Mew: A Playable Game Boy Quote")
+    end
+  end
+
+  context "cache metadata mismatch" do
+    it "raises an error when the cached model differs from config" do
+      # First, create a cache with the default model
+      default_config = {
+        "ai_related_posts" => {
+          "api_key" => "my_key",
+          "embeddings_source" => "mock"
+        }
+      }
+      default_site = fixture_site(default_config)
+      default_site.process
+
+      # Now change the config model and try again
+      new_config = {
+        "ai_related_posts" => {
+          "api_key" => "my_key",
+          "embeddings_source" => "mock",
+          "model" => "different-model"
+        }
+      }
+      new_site = fixture_site(new_config)
+
+      expect { new_site.process }.to raise_error(JekyllAiRelatedPosts::Error, /Cache model mismatch/)
     end
   end
 end
